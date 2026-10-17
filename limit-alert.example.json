@@ -1,0 +1,8 @@
+{
+  "elevenlabsApiKey": "",
+  "voiceId": "EXAVITQu4vr4xnSDxMaL",
+  "modelId": "eleven_flash_v2_5",
+  "systemVoice": "Zosia",
+  "announceDone": true,
+  "debug": false
+}
