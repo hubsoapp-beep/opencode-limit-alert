@@ -2,8 +2,23 @@
 
 Plugin do [OpenCode v2](https://opencode.ai) dla macOS. Gdy agent stanie, bo skończył się limit (rate limit / 429 / quota), padnie z błędem albo skończy zadanie, plugin:
 
-1. pokazuje powiadomienie macOS z nazwą sesji i treścią błędu,
+1. pokazuje banner w prawym górnym rogu z listą zadań, które stanęły,
 2. czyta na głos: *„Skończył się limit. Zadanie: <tytuł sesji>.”*
+
+Klik w zadanie na liście przełącza na jego kartę w **herdr**, **Orca** albo **Ghostty**.
+
+```
+┌──────────────────────────────────────────┐
+│ >_ OPENCODE · 3 ZADANIA            08:45 │
+│ ✓  Raycast z OmniRoute i MCP          ×  │
+│    Zadanie skończone · 08:45 · herdr     │
+│ ⚠  Aktualizacje na GitHubie           ×  │
+│    Zadanie stanęło · 08:45 · Orca        │
+│ ⌛ Lekka aplikacja notatek Raycast     ×  │
+│    Skończył się limit · 08:45 · Ghostty  │
+│ [         Wyczyść wszystko          ]    │
+└──────────────────────────────────────────┘
+```
 
 Głos: [ElevenLabs](https://elevenlabs.io) (jeśli podasz klucz). Gdy ElevenLabs nie działa (brak klucza, brak sieci, brak kredytów, błąd API), czyta darmowy systemowy głos macOS (`say`, domyślnie polska Zosia).
 
@@ -17,7 +32,7 @@ cd opencode-limit-alert
 ./install.sh
 ```
 
-Skrypt kopiuje `limit-alert.js` do `~/.config/opencode/plugins/` i tworzy `~/.config/opencode/limit-alert.json` z przykładu. Potem zrestartuj opencode. Jeśli działa usługa w tle (`opencode serve --service`), zrestartuj też ją.
+Skrypt kopiuje `limit-alert.js` do `~/.config/opencode/plugins/`, banner `alerts.py` do `~/bin/opencode-alerts/` i tworzy `~/.config/opencode/limit-alert.json` z przykładu. Potem zrestartuj opencode. Jeśli działa usługa w tle (`opencode serve --service`), zrestartuj też ją.
 
 ## Konfiguracja
 
@@ -29,6 +44,7 @@ Skrypt kopiuje `limit-alert.js` do `~/.config/opencode/plugins/` i tworzy `~/.co
 | `voiceId` | `EXAVITQu4vr4xnSDxMaL` (Sarah) | głos ElevenLabs. Na planie Free działają tylko głosy *premade*; głosy z biblioteki zwracają 402 |
 | `modelId` | `eleven_flash_v2_5` | model TTS (szybki, tani, obsługuje polski) |
 | `systemVoice` | `Zosia` | głos `say` do fallbacku (`say -v '?'` pokazuje listę) |
+| `bannerApp` | `~/bin/opencode-alerts/alerts.py` | banner z listą; brak pliku = zwykłe powiadomienie macOS |
 | `announceDone` | `true` | czytaj też „Zadanie skończone” |
 | `debug` | `false` | loguj eventy sesji do `$TMPDIR/limit-alert.log` |
 
@@ -45,17 +61,59 @@ Klucz trzymaj tylko w tym pliku lokalnie. Plik jest w `.gitignore`.
 
 Ten sam alert dla tej samej sesji odzywa się najwyżej raz na 60 s, także gdy plugin działa w kilku procesach opencode naraz.
 
+## Banner z listą
+
+`alerts.py` to mały program w Pythonie z PyObjC (oba są w macOS, nic nie trzeba instalować). Plugin zapisuje każde zdarzenie jako plik w `~/.opencode-alerts/` (jeden na sesję) i uruchamia `alerts.py show`. Banner odświeża listę co sekundę i znika, gdy lista jest pusta. Nie zabiera fokusu z klawiatury.
+
+- klik w wiersz albo **Przejdź**: przełącza na kartę zadania i zdejmuje je z listy,
+- **×** / **Odrzuć**: zdejmuje zadanie bez przełączania,
+- **Wyczyść wszystko**: czyści listę,
+- gdy zadanie ruszy dalej (`session.execution.started`), samo znika z listy.
+
+Jak banner znajduje kartę:
+
+| terminal | dopasowanie | przełączenie |
+|---|---|---|
+| herdr | `herdr pane list`: ID sesji, potem tytuł | `herdr workspace focus` + `herdr tab focus` + okno Ghostty z herdr |
+| Orca | `orca terminal list`: tytuł `OC \| …` | `orca terminal switch --terminal <handle>` |
+| Ghostty | menu Window: tytuł `OC \| …` (także ucięty `…`) | klik w pozycję menu |
+
+Przełączanie w Ghostty klika w menu przez System Events. Za pierwszym razem macOS poprosi o zgodę na **Dostępność** / **Automatyzację**. Zezwól w Ustawieniach systemowych → Prywatność i ochrona.
+
+Z wiersza poleceń:
+
+```sh
+~/bin/opencode-alerts/alerts.py add "Testowe zadanie" --kind limit   # dodaj testowy alert
+~/bin/opencode-alerts/alerts.py show                                 # pokaż banner
+~/bin/opencode-alerts/alerts.py list                                 # co wisi
+~/bin/opencode-alerts/alerts.py jump "Tytuł sesji"                   # przełącz na kartę
+~/bin/opencode-alerts/alerts.py clear                                # wyczyść
+tail -f /tmp/opencode-alerts.log
+```
+
+## Odinstalowanie
+
+```sh
+./uninstall.sh
+```
+
+## Testy
+
+```sh
+python3 test_alerts.py     # dopasowanie kart i kolejka
+```
+
 ## Test bez opencode
 
 ```sh
 node test/fake-event.mjs
 ```
 
-Wysyła udawany event „Rate limit exceeded”. Powinno pojawić się powiadomienie i głos.
+Wysyła udawany event „Rate limit exceeded”. Powinien pojawić się banner i głos.
 
 ## Wymagania
 
-- macOS (`osascript`, `afplay`, `say`)
+- macOS (`osascript`, `afplay`, `say`, systemowy `/usr/bin/python3` z PyObjC)
 - OpenCode v2 (plugin API `setup(ctx)`)
 
 ## Licencja

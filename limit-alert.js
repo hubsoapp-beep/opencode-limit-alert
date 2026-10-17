@@ -10,18 +10,33 @@
 //   "voiceId": "EXAVITQu4vr4xnSDxMaL",     // głos "premade" działa na planie Free
 //   "modelId": "eleven_flash_v2_5",
 //   "systemVoice": "Zosia",                // głos `say` do fallbacku
+//   "bannerApp": "~/bin/opencode-alerts/alerts.py", // lista zadań; brak pliku = zwykłe powiadomienie
 //   "announceDone": true,                  // czytaj też "zadanie skończone"
 //   "debug": false                         // loguj eventy do $TMPDIR/limit-alert.log
 // }
 
-import { execFile } from "node:child_process"
-import { appendFileSync, mkdirSync, openSync, closeSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs"
+import { execFile, spawn } from "node:child_process"
+import {
+  accessSync,
+  appendFileSync,
+  closeSync,
+  constants,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 
 const CONFIG_PATH = join(homedir(), ".config/opencode/limit-alert.json")
 const LOG_PATH = join(tmpdir(), "limit-alert.log")
 const LOCK_DIR = join(tmpdir(), "limit-alert-locks")
+// Kolejka dla bannera alerts.py: jeden plik JSON na sesję.
+const SPOOL = join(homedir(), ".opencode-alerts")
 const DEDUPE_MS = 60_000
 
 function loadConfig() {
@@ -36,6 +51,7 @@ function loadConfig() {
     voiceId: file.voiceId || "EXAVITQu4vr4xnSDxMaL",
     modelId: file.modelId || "eleven_flash_v2_5",
     systemVoice: file.systemVoice || "Zosia",
+    bannerApp: file.bannerApp || join(homedir(), "bin/opencode-alerts/alerts.py"),
     announceDone: file.announceDone !== false,
     debug: file.debug === true,
   }
@@ -65,6 +81,37 @@ function notify(title, body) {
     "-e",
     `display notification "${esc(body)}" with title "${esc(title)}" sound name "Basso"`,
   ])
+}
+
+function hasBanner() {
+  try {
+    accessSync(config.bannerApp, constants.R_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+const spoolFile = (sessionID) => join(SPOOL, `${String(sessionID).replace(/[^\w.-]/g, "_")}.json`)
+
+// Zapis do kolejki + start bannera. Drugi `show` sam wychodzi, gdy banner już działa.
+function queueBanner(item) {
+  try {
+    mkdirSync(SPOOL, { recursive: true })
+    const file = spoolFile(item.sessionID)
+    const tmp = `${file}.${process.pid}.tmp`
+    writeFileSync(tmp, JSON.stringify(item))
+    renameSync(tmp, file)
+    spawn("/usr/bin/python3", [config.bannerApp, "show"], { detached: true, stdio: "ignore" }).unref()
+  } catch (err) {
+    log("banner failed:", String(err))
+  }
+}
+
+function unqueue(sessionID) {
+  try {
+    unlinkSync(spoolFile(sessionID))
+  } catch {}
 }
 
 async function speakElevenLabs(text) {
@@ -151,7 +198,13 @@ async function alert(ctx, sessionID, kind, detail) {
   const title = await sessionTitle(ctx, sessionID)
   const heading = HEADINGS[kind]
   log("alert", kind, sessionID, title, detail)
-  await notify(`OpenCode: ${heading}`, `${title}${detail ? ` — ${detail}` : ""}`)
+  if (sessionID && hasBanner()) {
+    const time = new Date()
+    const local = new Date(time.getTime() - time.getTimezoneOffset() * 60_000).toISOString().slice(0, 19)
+    queueBanner({ id: `${sessionID}-${time.getTime()}`, sessionID, title, kind, detail: detail || "", time: local })
+  } else {
+    await notify(`OpenCode: ${heading}`, `${title}${detail ? ` — ${detail}` : ""}`)
+  }
   await speak(`${heading}. Zadanie: ${title}.`)
 }
 
@@ -200,6 +253,11 @@ export default {
               void alert(ctx, sessionID, isLimit(status, message) ? "limit" : "error", message)
               break
             }
+            // Zadanie ruszyło dalej albo zniknęło — zdejmij je z listy w bannerze.
+            case "session.execution.started":
+            case "session.deleted":
+              if (sessionID) unqueue(sessionID)
+              break
             case "session.execution.succeeded":
               if (config.announceDone) void alert(ctx, sessionID, "done")
               break
