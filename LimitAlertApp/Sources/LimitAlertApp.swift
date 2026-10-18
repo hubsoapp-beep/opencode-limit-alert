@@ -92,7 +92,7 @@ struct AppConfig: Codable {
 
 // MARK: - Alert Store
 
-class AlertStore: ObservableObject {
+class AlertStore: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
     @Published var alerts: [AlertItem] = []
     let panel = FloatingPanelController()
     @Published var history: [AlertItem] = []
@@ -112,8 +112,14 @@ class AlertStore: ObservableObject {
     private var advanceTask: DispatchWorkItem?
     private var enqueueTask: DispatchWorkItem?
     private var pendingNew: [AlertItem] = []
+    /// Ostatnie alerty wysłane jako natywne powiadomienia — po kliknięciu
+    /// w powiadomienie w Centrum powiadomień wracamy do właściwego zadania.
+    private var notified: [String: AlertItem] = [:]
+    private var notifiedOrder: [String] = []
 
-    init() {
+    override init() {
+        super.init()
+        UNUserNotificationCenter.current().delegate = self
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
         loadHistory()
         panel.state.onAction = { [weak self] item, action in
@@ -295,6 +301,7 @@ class AlertStore: ObservableObject {
     private func autoAdvance() {
         guard let item = current else { return }
         DebugLog.write("auto-advance \(item.id)")
+        forgetNotification(item.id)
         removeFromSpool(item)
         alerts.removeAll { $0.id == item.id }
         knownIDs.remove(item.id)
@@ -319,6 +326,7 @@ class AlertStore: ObservableObject {
 
     private func perform(_ action: BannerAction, for item: AlertItem) {
         DebugLog.write("perform \(action) \(item.id)")
+        forgetNotification(item.id)
         removeFromSpool(item)
         alerts.removeAll { $0.id == item.id }
         queue.removeAll { $0.id == item.id }
@@ -384,6 +392,12 @@ class AlertStore: ObservableObject {
     }
 
     private func sendNativeNotification(item: AlertItem, withSound: Bool) {
+        notified[item.id] = item
+        if !notifiedOrder.contains(item.id) { notifiedOrder.append(item.id) }
+        if notifiedOrder.count > 50 {
+            let old = notifiedOrder.removeFirst()
+            notified.removeValue(forKey: old)
+        }
         let content = UNMutableNotificationContent()
         content.title = "LimitAlert"
         content.subtitle = item.title
@@ -391,6 +405,26 @@ class AlertStore: ObservableObject {
         content.sound = withSound ? .default : nil
         let req = UNNotificationRequest(identifier: item.id, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(req)
+    }
+
+    private func forgetNotification(_ id: String) {
+        notified.removeValue(forKey: id)
+        notifiedOrder.removeAll { $0 == id }
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [id])
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [id])
+    }
+
+    /// Klik w natywne powiadomienie = przejście do zadania (jak klik w baner).
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        let id = response.notification.request.identifier
+        DispatchQueue.main.async {
+            if let item = self.notified[id] ?? self.alerts.first(where: { $0.id == id }) {
+                self.jump(item)
+            }
+            completionHandler()
+        }
     }
 
     private func sendWebhook(item: AlertItem, url: String) {

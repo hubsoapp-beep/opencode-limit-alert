@@ -87,6 +87,8 @@ Gdy baner jest widoczny:
 
 Klik w baner też nadaje fokus. Bez fokusu baner nie przechwytuje klawiszy z terminala.
 
+**Klik w alert** (wiersz lub nagłówek) albo w przycisk **Przejdź** od razu przełącza na kartę zadania w herdr / Orca / Ghostty. To samo robi klik w natywne powiadomienie macOS. **×** zamyka alert bez przełączania.
+
 ## Banner z listą (alerts.py)
 
 `alerts.py` to mały program w Pythonie z PyObjC (oba są w macOS, nic nie trzeba instalować). Plugin zapisuje każde zdarzenie jako plik w `~/.opencode-alerts/` (jeden na sesję) i uruchamia `alerts.py show`. Banner odświeża listę co sekundę i znika, gdy lista jest pusta. Nie zabiera fokusu z klawiatury. To tryb awaryjny — gdy działa `LimitAlert.app`, to ona pokazuje kolejkę opisana wyżej.
@@ -159,8 +161,9 @@ Tytuł alertu to nazwa katalogu projektu (`cwd`), np. „Claude Code · myprojec
 
 `install.sh` (gdy jest `swift`) buduje `~/Applications/LimitAlert.app` — aplikację w pasku menu, która:
 - pokazuje alerty **jeden po drugim** (wspólna kolejka banera i głosu — nic się nie nakłada),
+- **klik w alert** albo w natywne powiadomienie przełącza na kartę zadania (herdr / Orca / Ghostty),
 - pozwala sterować banerem z klawiatury: **←/→**, **Tab**, **1/2**, **↵**, **Esc**; fokus włącza klik lub **⌥⌘L**,
-- pokazuje listę alertów i pozwala przejść/odrzucić/wyczyścić,
+- w pasku menu pokazuje listę alertów i pozwala przejść/odrzucić/wyczyścić,
 - ma okno ustawień (klucz ElevenLabs, głosy per agent, cicha godzina, routing, webhook Slack/Telegram, natywne powiadomienia Apple, czas trzymania banera),
 - czyta historię alertów,
 - wysyła natywne powiadomienia macOS.

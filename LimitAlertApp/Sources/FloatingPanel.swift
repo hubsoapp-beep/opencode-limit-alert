@@ -134,6 +134,13 @@ struct BannerView: View {
             }
         }
         .frame(height: 18)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if let item = model.item {
+                model.state.onAction?(item, .jump)
+            }
+        }
+        .help("Kliknij, aby przejść do zadania")
     }
 
     private var headerTitle: String {
@@ -346,7 +353,7 @@ final class FloatingPanelController {
         if let model { return model }
 
         let model = BannerModel(state: state)
-        let hosting = NSHostingView(rootView: BannerView(model: model))
+        let hosting = FirstMouseHostingView(rootView: BannerView(model: model))
         hosting.wantsLayer = true
 
         let panel = KeyablePanel(
@@ -433,6 +440,12 @@ final class FloatingPanelController {
     private func fire(_ action: BannerAction, _ item: AlertItem) {
         state.onAction?(item, action)
     }
+}
+
+/// `NSPanel` bez fokusu zjada pierwszy klik. Ten widok oddaje go od razu
+/// SwiftUI, więc klik w wiersz od razu przełącza na zadanie.
+private final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
 private final class KeyablePanel: NSPanel {
