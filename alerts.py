@@ -21,6 +21,7 @@ import urllib.error
 
 SPOOL = Path.home() / ".opencode-alerts"
 LOCK = SPOOL / ".show.lock"
+SPEAK_LOCK = SPOOL / ".speak.lock"
 LOG = Path("/tmp/opencode-alerts.log")
 MAX_ROWS = 6
 
@@ -511,6 +512,18 @@ def load_config():
 
 
 def speak_text(text):
+    """Czyta tekst, czekając aż poprzednie czytanie się skończy.
+
+    Banner ma własną kolejkę, ale `alerts.py speak/alert` może być uruchomiony
+    równolegle z kilku procesów — lock sprawia, że głosy się nie nakładają.
+    """
+    SPOOL.mkdir(exist_ok=True)
+    with SPEAK_LOCK.open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        _speak_text(text)
+
+
+def _speak_text(text):
     cfg = load_config()
     api_key = cfg["apiKey"]
     if api_key:

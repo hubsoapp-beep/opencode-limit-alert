@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import SwiftUI
 
 // MARK: - Obecność aplikacji
@@ -22,14 +23,23 @@ enum AppPresence {
 
 // MARK: - Stan i model banera
 
-final class BannerState {
-    var onJump: ((AlertItem) -> Void)?
-    var onDismiss: ((AlertItem) -> Void)?
-    var onClear: (() -> Void)?
+enum BannerAction {
+    case dismiss
+    case jump
 }
 
+final class BannerState {
+    var onAction: ((AlertItem, BannerAction) -> Void)?
+}
+
+/// Baner pokazuje dokładnie jeden alert naraz. Kolejka (indeks / liczba)
+/// jest sterowana przez `AlertStore`, więc kilka alertów nie nakłada się.
 final class BannerModel: ObservableObject {
-    @Published var alerts: [AlertItem] = []
+    @Published var item: AlertItem?
+    @Published var index: Int = 1
+    @Published var total: Int = 1
+    /// 0 = Odrzuć, 1 = Przejdź (domyślnie).
+    @Published var selection: Int = 1
     let state: BannerState
 
     init(state: BannerState) {
@@ -38,10 +48,8 @@ final class BannerModel: ObservableObject {
 }
 
 enum BannerStyle {
-    static let width: CGFloat = 360
+    static let width: CGFloat = 384
     static let padding: CGFloat = 12
-    static let rowHeight: CGFloat = 52
-    static let maxRows = 5
     static let margin: CGFloat = 16
 }
 
@@ -70,40 +78,35 @@ enum DebugLog {
 struct BannerView: View {
     @ObservedObject var model: BannerModel
 
-    private var visible: [AlertItem] { Array(model.alerts.prefix(BannerStyle.maxRows)) }
-    private var overflow: Int { max(0, model.alerts.count - visible.count) }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            header
-
-            VStack(spacing: 0) {
-                ForEach(visible) { item in
+        Group {
+            if let item = model.item {
+                VStack(alignment: .leading, spacing: 8) {
+                    header
                     BannerRow(item: item,
-                              onJump: { model.state.onJump?(item) },
-                              onDismiss: { model.state.onDismiss?(item) })
+                              onJump: {
+                                  DebugLog.write("click row jump")
+                                  model.state.onAction?(item, .jump)
+                              },
+                              onDismiss: {
+                                  DebugLog.write("click x dismiss")
+                                  model.state.onAction?(item, .dismiss)
+                              })
+                    hint
+                    footer(item)
                 }
-            }
-
-            if overflow > 0 {
-                Text("+\(overflow) więcej")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
-                    .padding(.leading, 30)
-            }
-
-            footer
-        }
-        .padding(BannerStyle.padding)
-        .frame(width: BannerStyle.width)
-        .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay(
+                .padding(BannerStyle.padding)
+                .frame(width: BannerStyle.width)
+                .background(
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5)
+                        .fill(.ultraThinMaterial)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5)
+                        )
                 )
-        )
+            }
+        }
     }
 
     // MARK: Nagłówek
@@ -119,6 +122,11 @@ struct BannerView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             Spacer(minLength: 8)
+            if model.total > 1 {
+                Text("\(model.index) / \(model.total)")
+                    .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
             TimelineView(.periodic(from: .now, by: 30)) { context in
                 Text(Self.clock.string(from: context.date))
                     .font(.system(size: 11, weight: .medium).monospacedDigit())
@@ -129,14 +137,7 @@ struct BannerView: View {
     }
 
     private var headerTitle: String {
-        let n = model.alerts.count
-        let noun: String
-        switch n {
-        case 1: noun = "ZADANIE"
-        case 2...4: noun = "ZADANIA"
-        default: noun = "ZADAŃ"
-        }
-        return "ALERTY · \(n) \(noun)"
+        model.total > 1 ? "ALERTY W KOLEJCE" : "ALERT"
     }
 
     private static let clock: DateFormatter = {
@@ -145,20 +146,30 @@ struct BannerView: View {
         return f
     }()
 
+    // MARK: Sterowanie klawiaturą
+
+    private var hint: some View {
+        Text("⌥⌘L  ·  ← → wybór  ·  Tab  ·  1 / 2  ·  ↵  ·  Esc")
+            .font(.system(size: 10))
+            .foregroundStyle(.tertiary)
+            .lineLimit(1)
+            .padding(.leading, 2)
+    }
+
     // MARK: Stopka
 
-    @ViewBuilder
-    private var footer: some View {
+    private func footer(_ item: AlertItem) -> some View {
         HStack(spacing: 8) {
-            if model.alerts.count == 1, let item = model.alerts.first {
-                Button("Odrzuć") { model.state.onDismiss?(item) }
-                    .buttonStyle(BannerButtonStyle(prominent: false))
-                Button("Przejdź") { model.state.onJump?(item) }
-                    .buttonStyle(BannerButtonStyle(prominent: true))
-            } else {
-                Button("Wyczyść wszystko") { model.state.onClear?() }
-                    .buttonStyle(BannerButtonStyle(prominent: false))
+            Button("1  Odrzuć") {
+                DebugLog.write("button 1")
+                model.state.onAction?(item, .dismiss)
             }
+            .buttonStyle(BannerButtonStyle(prominent: false, selected: model.selection == 0))
+            Button("2  Przejdź") {
+                DebugLog.write("button 2")
+                model.state.onAction?(item, .jump)
+            }
+            .buttonStyle(BannerButtonStyle(prominent: true, selected: model.selection == 1))
         }
     }
 }
@@ -200,7 +211,7 @@ private struct BannerRow: View {
             .help("Odrzuć")
         }
         .padding(.horizontal, 8)
-        .frame(height: BannerStyle.rowHeight - 2)
+        .frame(height: 50)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(hover ? Color.primary.opacity(0.06) : Color.clear)
@@ -240,18 +251,28 @@ private struct BannerRow: View {
 
 private struct BannerButtonStyle: ButtonStyle {
     let prominent: Bool
+    let selected: Bool
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 12, weight: .medium))
             .frame(maxWidth: .infinity)
-            .frame(height: 28)
+            .frame(height: 30)
             .background(
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
                     .fill(background(pressed: configuration.isPressed))
             )
+            .overlay(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .strokeBorder(border, lineWidth: 2)
+            )
             .foregroundStyle(prominent ? Color.white : Color.primary)
             .contentShape(Rectangle())
+    }
+
+    private var border: Color {
+        guard selected else { return .clear }
+        return prominent ? Color.white.opacity(0.85) : Color.accentColor
     }
 
     private func background(pressed: Bool) -> Color {
@@ -264,29 +285,63 @@ private struct BannerButtonStyle: ButtonStyle {
 
 // MARK: - Panel
 
-/// Pływający baner w prawym górnym rogu. Nie przejmuje fokusu klawiatury.
+/// Pływający baner w prawym górnym rogu. Domyślnie nie zabiera fokusu.
+/// Klik w baner albo ⌥⌘L włącza sterowanie klawiaturą.
 final class FloatingPanelController {
     let state = BannerState()
 
-    private var panel: NSPanel?
+    private var panel: KeyablePanel?
     private var hosting: NSHostingView<BannerView>?
     private var model: BannerModel?
+    private var keyMonitor: Any?
+    private var hotKey: GlobalHotKey?
 
-    func update(alerts: [AlertItem]) {
-        if !Thread.isMainThread {
-            DispatchQueue.main.async { [weak self] in self?.update(alerts: alerts) }
-            return
+    init() {
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, let panel = self.panel, panel.isKeyWindow else { return event }
+            return self.handle(event) ? nil : event
         }
-        guard !alerts.isEmpty else {
-            panel?.orderOut(nil)
+        hotKey = GlobalHotKey(key: UInt32(kVK_ANSI_L), modifiers: UInt32(cmdKey | optionKey)) { [weak self] in
+            self?.focus()
+        }
+    }
+
+    deinit {
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+    }
+
+    func present(_ item: AlertItem, index: Int, total: Int) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in self?.present(item, index: index, total: total) }
             return
         }
         let model = ensurePanel()
-        model.alerts = alerts
+        model.item = item
+        model.index = index
+        model.total = total
+        model.selection = 1
         layoutAndShow()
     }
 
-    @discardableResult
+    func updateProgress(index: Int, total: Int) {
+        DispatchQueue.main.async {
+            self.model?.index = index
+            self.model?.total = total
+        }
+    }
+
+    func hide() {
+        panel?.orderOut(nil)
+    }
+
+    /// Nadaje banerowi fokus klawiatury bez aktywowania całej aplikacji.
+    func focus() {
+        guard let panel, panel.isVisible else { return }
+        DebugLog.write("focus panel")
+        panel.makeKeyAndOrderFront(nil)
+        model?.selection = 1
+    }
+
     private func ensurePanel() -> BannerModel {
         if let model { return model }
 
@@ -294,21 +349,21 @@ final class FloatingPanelController {
         let hosting = NSHostingView(rootView: BannerView(model: model))
         hosting.wantsLayer = true
 
-        let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: BannerStyle.width, height: 200),
+        let panel = KeyablePanel(
+            contentRect: NSRect(x: 0, y: 0, width: BannerStyle.width, height: 220),
             styleMask: [.nonactivatingPanel, .borderless, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         panel.isFloatingPanel = true
-        panel.level = NSWindow.Level(rawValue: 101) // nad pełnoekranowymi oknami (jak banner Python)
+        panel.level = NSWindow.Level(rawValue: 101)
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
         panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = true
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = true
-        panel.becomesKeyOnlyIfNeeded = true
+        panel.becomesKeyOnlyIfNeeded = false
         panel.animationBehavior = .none
         panel.contentView = hosting
 
@@ -322,7 +377,7 @@ final class FloatingPanelController {
         guard let panel, let hosting else { return }
         hosting.layoutSubtreeIfNeeded()
 
-        let height = max(120, ceil(hosting.fittingSize.height))
+        let height = max(150, ceil(hosting.fittingSize.height))
         let size = NSSize(width: BannerStyle.width, height: height)
         if panel.frame.size != size {
             panel.setContentSize(size)
@@ -341,5 +396,78 @@ final class FloatingPanelController {
             y: frame.maxY - size.height - BannerStyle.margin
         )
         panel.setFrame(NSRect(origin: origin, size: size), display: true)
+    }
+
+    // MARK: Klawiatura
+
+    private func handle(_ event: NSEvent) -> Bool {
+        guard let model, let item = model.item else { return false }
+        DebugLog.write("key \(event.keyCode)")
+        switch event.keyCode {
+        case 123: // ←
+            model.selection = 0
+            return true
+        case 124: // →
+            model.selection = 1
+            return true
+        case 48: // Tab / Shift+Tab — dwa przyciski, więc przełącza w obie strony
+            model.selection = model.selection == 0 ? 1 : 0
+            return true
+        case 18: // 1
+            fire(.dismiss, item)
+            return true
+        case 19: // 2
+            fire(.jump, item)
+            return true
+        case 36, 76, 49: // Return, keypad Enter, Space
+            fire(model.selection == 0 ? .dismiss : .jump, item)
+            return true
+        case 53: // Esc
+            fire(.dismiss, item)
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func fire(_ action: BannerAction, _ item: AlertItem) {
+        state.onAction?(item, action)
+    }
+}
+
+private final class KeyablePanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
+// MARK: - Globalny skrót ⌥⌘L
+
+private final class GlobalHotKey {
+    private var hotKeyRef: EventHotKeyRef?
+    private var handlerRef: EventHandlerRef?
+    private let callback: () -> Void
+
+    init(key: UInt32, modifiers: UInt32, callback: @escaping () -> Void) {
+        self.callback = callback
+        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
+                                      eventKind: UInt32(kEventHotKeyPressed))
+        InstallEventHandler(GetApplicationEventTarget(), { _, _, userData in
+            guard let userData else { return noErr }
+            let hotKey = Unmanaged<GlobalHotKey>.fromOpaque(userData).takeUnretainedValue()
+            DispatchQueue.main.async { hotKey.callback() }
+            return noErr
+        }, 1, &eventType, Unmanaged.passUnretained(self).toOpaque(), &handlerRef)
+
+        let hotKeyID = EventHotKeyID(signature: OSType(0x4C414C54), id: 1) // 'LALT'
+        let status = RegisterEventHotKey(key, modifiers, hotKeyID,
+                                         GetApplicationEventTarget(), 0, &hotKeyRef)
+        if status != noErr {
+            DebugLog.write("hotkey registration failed: \(status)")
+        }
+    }
+
+    deinit {
+        if let hotKeyRef { UnregisterEventHotKey(hotKeyRef) }
+        if let handlerRef { RemoveEventHandler(handlerRef) }
     }
 }

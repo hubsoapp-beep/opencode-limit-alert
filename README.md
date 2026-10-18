@@ -46,6 +46,8 @@ Skrypt kopiuje `limit-alert.js` do `~/.config/opencode/plugins/`, banner `alerts
 | `systemVoice` | `Zosia` | głos `say` do fallbacku (`say -v '?'` pokazuje listę) |
 | `bannerApp` | `~/bin/opencode-alerts/alerts.py` | banner z listą; brak pliku = zwykłe powiadomienie macOS |
 | `announceDone` | `true` | czytaj też „Zadanie skończone” |
+| `toastHoldSeconds` | `4` | ile sekund baner trzyma przeczytany alert, zanim pokaże następny |
+| `toastNoVoiceSeconds` | `7` | to samo, gdy głos jest wyłączony |
 | `debug` | `false` | loguj eventy sesji do `$TMPDIR/limit-alert.log` |
 
 Klucz trzymaj tylko w tym pliku lokalnie. Plik jest w `.gitignore`.
@@ -61,9 +63,33 @@ Klucz trzymaj tylko w tym pliku lokalnie. Plik jest w `.gitignore`.
 
 Ten sam alert dla tej samej sesji odzywa się najwyżej raz na 60 s, także gdy plugin działa w kilku procesach opencode naraz.
 
-## Banner z listą
+## Kolejka powiadomień
 
-`alerts.py` to mały program w Pythonie z PyObjC (oba są w macOS, nic nie trzeba instalować). Plugin zapisuje każde zdarzenie jako plik w `~/.opencode-alerts/` (jeden na sesję) i uruchamia `alerts.py show`. Banner odświeża listę co sekundę i znika, gdy lista jest pusta. Nie zabiera fokusu z klawiatury.
+Gdy w krótkim czasie pojawi się kilka alertów, **nie wyskakują naraz i nie mówią jednocześnie**:
+
+- baner pokazuje **jeden alert na raz** (`1 / 3`, `2 / 3`…), a po przeczytaniu i krótkiej pauzie przechodzi do następnego,
+- głos ma jedną wspólną kolejkę — następne zdanie startuje dopiero po zakończeniu poprzedniego,
+- natywne powiadomienie macOS też leci w rytmie kolejki, więc nie zasypuje ekranu.
+- Długość pauzy ustawisz w Ustawieniach → **Kolejka banera** (`toastHoldSeconds`, `toastNoVoiceSeconds`).
+
+### Sterowanie klawiaturą
+
+Gdy baner jest widoczny:
+
+| klawisz | działanie |
+|---|---|
+| **← / →** | wybór akcji (Odrzuć / Przejdź) |
+| **Tab** / **Shift+Tab** | przełączenie między przyciskami |
+| **1** / **2** | od razu Odrzuć / Przejdź |
+| **↵** / **Space** | wykonaj wybraną akcję |
+| **Esc** | odrzuć bieżący alert |
+| **⌥⌘L** | nadaj banerowi fokus klawiatury (bez przełączania aplikacji) |
+
+Klik w baner też nadaje fokus. Bez fokusu baner nie przechwytuje klawiszy z terminala.
+
+## Banner z listą (alerts.py)
+
+`alerts.py` to mały program w Pythonie z PyObjC (oba są w macOS, nic nie trzeba instalować). Plugin zapisuje każde zdarzenie jako plik w `~/.opencode-alerts/` (jeden na sesję) i uruchamia `alerts.py show`. Banner odświeża listę co sekundę i znika, gdy lista jest pusta. Nie zabiera fokusu z klawiatury. To tryb awaryjny — gdy działa `LimitAlert.app`, to ona pokazuje kolejkę opisana wyżej.
 
 - klik w wiersz albo **Przejdź**: przełącza na kartę zadania i zdejmuje je z listy,
 - **×** / **Odrzuć**: zdejmuje zadanie bez przełączania,
@@ -132,13 +158,15 @@ Tytuł alertu to nazwa katalogu projektu (`cwd`), np. „Claude Code · myprojec
 ## Aplikacja menu bar (LimitAlert.app)
 
 `install.sh` (gdy jest `swift`) buduje `~/Applications/LimitAlert.app` — aplikację w pasku menu, która:
+- pokazuje alerty **jeden po drugim** (wspólna kolejka banera i głosu — nic się nie nakłada),
+- pozwala sterować banerem z klawiatury: **←/→**, **Tab**, **1/2**, **↵**, **Esc**; fokus włącza klik lub **⌥⌘L**,
 - pokazuje listę alertów i pozwala przejść/odrzucić/wyczyścić,
-- ma okno ustawień (klucz ElevenLabs, głosy per agent, cicha godzina, routing, webhook Slack/Telegram, natywne powiadomienia Apple),
+- ma okno ustawień (klucz ElevenLabs, głosy per agent, cicha godzina, routing, webhook Slack/Telegram, natywne powiadomienia Apple, czas trzymania banera),
 - czyta historię alertów,
 - wysyła natywne powiadomienia macOS.
 
 Uruchomienie: `open ~/Applications/LimitAlert.app`. Aplikacja startuje przy logowaniu (ustaw w Ustawieniach systemowych → Ogólne → Elementy logowania), jeśli dodasz ją ręcznie.
 
-Gdy aplikacja działa, przejmuje baner i głos (z ustawieniami per agent, cichą godziną i routingiem). `alerts.py` i plugin JS zapisują wtedy tylko alert do kolejki — nie otwierają drugiego bannera ani nie czytają go ponownie. Po zamknięciu aplikacji wraca samodzielny banner Python.
+Gdy aplikacja działa, przejmuje baner i głos (z ustawieniami per agent, cichą godziną i routingiem). `alerts.py` i plugin JS zapisują wtedy tylko alert do kolejki — nie otwierają drugiego bannera ani nie czytają go ponownie. Po zamknięciu aplikacji wraca samodzielny banner Python (z blokadą głosu, więc równoległe procesy też się nie nakładają).
 
-Jeszcze nie zaimplementowane: własny globalny skrót klawiszowy, auto-aktualizacje (Sparkle), pełny status uprawnień Dostępności z przyciskiem naprawy.
+Jeszcze nie zaimplementowane: auto-aktualizacje (Sparkle), pełny status uprawnień Dostępności z przyciskiem naprawy.

@@ -38,9 +38,40 @@ struct AppConfig: Codable {
     var systemVoiceByAgent: [String: String] = [:]
     var agentEnabled: [String: Bool] = ["opencode": true, "claude-code": true, "codex": true]
     var agentMode: [String: String] = [:] // voice+notify | notify-only | banner-only
+    /// Ile sekund baner trzyma alert po przeczytaniu, zanim pokaże następny.
+    var toastHoldSeconds: Double = 4
+    /// To samo, gdy głos jest wyłączony (trzeba więcej czasu na przeczytanie).
+    var toastNoVoiceSeconds: Double = 7
 
     static let configPath = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".config/opencode/limit-alert.json")
+
+    init() {}
+
+    /// Ręczne dekodowanie, bo syntezowane `Codable` wymagałoby wszystkich kluczy
+    /// w pliku JSON. Dzięki temu stary/niepełny config nie resetuje ustawień
+    /// (np. klucza ElevenLabs) do domyślnych.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = AppConfig()
+        elevenlabsApiKey = try c.decodeIfPresent(String.self, forKey: .elevenlabsApiKey) ?? d.elevenlabsApiKey
+        voiceId = try c.decodeIfPresent(String.self, forKey: .voiceId) ?? d.voiceId
+        modelId = try c.decodeIfPresent(String.self, forKey: .modelId) ?? d.modelId
+        systemVoice = try c.decodeIfPresent(String.self, forKey: .systemVoice) ?? d.systemVoice
+        announceDone = try c.decodeIfPresent(Bool.self, forKey: .announceDone) ?? d.announceDone
+        debug = try c.decodeIfPresent(Bool.self, forKey: .debug) ?? d.debug
+        useNativeNotifications = try c.decodeIfPresent(Bool.self, forKey: .useNativeNotifications) ?? d.useNativeNotifications
+        bannerOnlyNoVoice = try c.decodeIfPresent(Bool.self, forKey: .bannerOnlyNoVoice) ?? d.bannerOnlyNoVoice
+        quietHoursStart = try c.decodeIfPresent(Int.self, forKey: .quietHoursStart) ?? d.quietHoursStart
+        quietHoursEnd = try c.decodeIfPresent(Int.self, forKey: .quietHoursEnd) ?? d.quietHoursEnd
+        webhookURL = try c.decodeIfPresent(String.self, forKey: .webhookURL) ?? d.webhookURL
+        voiceByAgent = try c.decodeIfPresent([String: String].self, forKey: .voiceByAgent) ?? d.voiceByAgent
+        systemVoiceByAgent = try c.decodeIfPresent([String: String].self, forKey: .systemVoiceByAgent) ?? d.systemVoiceByAgent
+        agentEnabled = try c.decodeIfPresent([String: Bool].self, forKey: .agentEnabled) ?? d.agentEnabled
+        agentMode = try c.decodeIfPresent([String: String].self, forKey: .agentMode) ?? d.agentMode
+        toastHoldSeconds = try c.decodeIfPresent(Double.self, forKey: .toastHoldSeconds) ?? d.toastHoldSeconds
+        toastNoVoiceSeconds = try c.decodeIfPresent(Double.self, forKey: .toastNoVoiceSeconds) ?? d.toastNoVoiceSeconds
+    }
 
     static func load() -> AppConfig {
         guard let data = try? Data(contentsOf: configPath),
@@ -67,20 +98,27 @@ class AlertStore: ObservableObject {
     @Published var history: [AlertItem] = []
     private let spool = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".opencode-alerts")
     private var timer: Timer?
-    /// Trzymamy odtwarzacz, inaczej AVAudioPlayer zwalnia się i głos ucina.
-    private var player: AVAudioPlayer?
+    private let speech = SpeechQueue()
     private let historyFile = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".opencode-alerts/history.jsonl")
+
+    /// Alert aktualnie pokazany w banerze i kolejka następnych. Jeden na raz —
+    /// dzięki temu kilka alertów nie wyskakuje i nie mówi jednocześnie.
+    private var current: AlertItem?
+    private var queue: [AlertItem] = []
+    private var knownIDs = Set<String>()
+    private var batchIndex = 0
+    private var batchTotal = 0
+    private var advanceTask: DispatchWorkItem?
+    private var enqueueTask: DispatchWorkItem?
+    private var pendingNew: [AlertItem] = []
 
     init() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
         loadHistory()
-        panel.state.onJump = { [weak self] item in
-            guard let self else { return }
-            self.jump(item)
+        panel.state.onAction = { [weak self] item, action in
+            self?.perform(action, for: item)
         }
-        panel.state.onDismiss = { [weak self] item in self?.remove(item) }
-        panel.state.onClear = { [weak self] in self?.clearAll() }
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.refresh()
@@ -99,18 +137,201 @@ class AlertStore: ObservableObject {
         }
         items.sort { $0.time > $1.time }
         DispatchQueue.main.async {
-            let oldIds = Set(self.alerts.map { $0.id })
-            let newItems = items.filter { !oldIds.contains($0.id) }
-            self.alerts = items
-            self.panel.update(alerts: items)
-            for item in newItems {
-                self.handleNewItem(item)
-                self.appendHistory(item)
+            let visible = Set(items.map { $0.id })
+
+            // Alert zniknął z kolejki (np. sesja ruszyła dalej) — zdejmij go też z banera.
+            self.queue.removeAll { !visible.contains($0.id) }
+            if let current = self.current, !visible.contains(current.id) {
+                self.clearCurrent()
             }
+
+            // Nowe pokazujemy w kolejności pojawienia się (najstarszy pierwszy).
+            let fresh = items
+                .filter { !self.knownIDs.contains($0.id) }
+                .sorted { $0.time < $1.time }
+            self.knownIDs = visible
+            self.alerts = items
+            self.collect(fresh)
+            self.pump()
         }
     }
 
     func remove(_ item: AlertItem) {
+        perform(.dismiss, for: item)
+    }
+
+    func jump(_ item: AlertItem) {
+        perform(.jump, for: item)
+    }
+
+    func clearAll() {
+        DebugLog.write("clearAll")
+        advanceTask?.cancel()
+        advanceTask = nil
+        enqueueTask?.cancel()
+        enqueueTask = nil
+        pendingNew.removeAll()
+        speech.stop()
+        current = nil
+        queue.removeAll()
+        panel.hide()
+        if let files = try? FileManager.default.contentsOfDirectory(at: spool, includingPropertiesForKeys: nil) {
+            for u in files where u.pathExtension == "json" {
+                try? FileManager.default.removeItem(at: u)
+            }
+        }
+        knownIDs.removeAll()
+        alerts.removeAll()
+    }
+
+    // MARK: - Kolejka
+
+    /// Alerty zapisane niemal równocześnie (np. kilka sesji naraz) zbieramy
+    /// przez chwilę, żeby od razu znać pełne „1 / 3”, a nie „1 / 1”.
+    private func collect(_ items: [AlertItem]) {
+        guard !items.isEmpty else { return }
+        for item in items where !pendingNew.contains(where: { $0.id == item.id }) {
+            pendingNew.append(item)
+        }
+        enqueueTask?.cancel()
+        let task = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            let batch = self.pendingNew.sorted { $0.time < $1.time }
+            self.pendingNew.removeAll()
+            for item in batch { self.enqueue(item) }
+            self.pump()
+        }
+        enqueueTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: task)
+    }
+
+    private func enqueue(_ item: AlertItem) {
+        guard current?.id != item.id, !queue.contains(where: { $0.id == item.id }) else { return }
+        if current == nil && queue.isEmpty {
+            batchIndex = 0
+            batchTotal = 0
+        }
+        queue.append(item)
+        appendHistory(item)
+        if current != nil {
+            batchTotal = max(batchTotal, batchIndex + queue.count)
+            panel.updateProgress(index: batchIndex, total: batchTotal)
+        }
+    }
+
+    private func pump() {
+        guard current == nil, !queue.isEmpty else { return }
+        let item = queue.removeFirst()
+        current = item
+        batchIndex += 1
+        batchTotal = max(batchTotal, batchIndex + queue.count)
+        present(item)
+    }
+
+    private func present(_ item: AlertItem) {
+        let cfg = AppConfig.load()
+        let agent = item.agent ?? "opencode"
+        guard cfg.agentEnabled[agent] ?? true else {
+            clearCurrent()
+            return
+        }
+
+        let mode = cfg.agentMode[agent] ?? "voice+notify"
+        if !cfg.webhookURL.isEmpty {
+            sendWebhook(item: item, url: cfg.webhookURL)
+        }
+
+        let hour = Calendar.current.component(.hour, from: Date())
+        let quiet = isQuietHour(hour: hour, start: cfg.quietHoursStart, end: cfg.quietHoursEnd)
+        let voiceAllowed = !cfg.bannerOnlyNoVoice
+            && mode != "notify-only"
+            && mode != "banner-only"
+            && !quiet
+            && (item.kind != "done" || cfg.announceDone)
+        let notifies = cfg.useNativeNotifications && mode != "banner-only"
+
+        DebugLog.write("present \(batchIndex)/\(batchTotal) \(item.id) agent=\(agent) quiet=\(quiet) voice=\(voiceAllowed)")
+        panel.present(item, index: batchIndex, total: max(batchTotal, 1))
+        if notifies {
+            // Gdy i tak czytamy na głos, natywne powiadomienie nie dodaje dźwięku.
+            sendNativeNotification(item: item, withSound: !voiceAllowed)
+        }
+
+        if voiceAllowed {
+            let heading: String
+            switch item.kind {
+            case "limit": heading = "Skończył się limit"
+            case "error": heading = "Zadanie stanęło"
+            case "done": heading = "Zadanie skończone"
+            default: heading = "Alert"
+            }
+            let text = "\(heading). Zadanie: \(item.title)."
+            let voiceId = cfg.voiceByAgent[agent] ?? cfg.voiceId
+            let systemVoice = cfg.systemVoiceByAgent[agent] ?? cfg.systemVoice
+            speech.enqueue(text: text,
+                           voiceId: voiceId,
+                           systemVoice: systemVoice,
+                           apiKey: cfg.elevenlabsApiKey,
+                           modelId: cfg.modelId) { [weak self] in
+                self?.scheduleAdvance(after: cfg.toastHoldSeconds)
+            }
+        } else {
+            scheduleAdvance(after: cfg.toastNoVoiceSeconds)
+        }
+    }
+
+    private func scheduleAdvance(after seconds: TimeInterval) {
+        DebugLog.write("hold \(seconds)s")
+        advanceTask?.cancel()
+        let task = DispatchWorkItem { [weak self] in
+            guard let self, self.current != nil else { return }
+            self.autoAdvance()
+        }
+        advanceTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(1, seconds), execute: task)
+    }
+
+    /// Po przeczytaniu alert znika i zaczyna się następny z kolejki.
+    private func autoAdvance() {
+        guard let item = current else { return }
+        DebugLog.write("auto-advance \(item.id)")
+        removeFromSpool(item)
+        alerts.removeAll { $0.id == item.id }
+        knownIDs.remove(item.id)
+        clearCurrent()
+    }
+
+    private func clearCurrent() {
+        DebugLog.write("clear current \(current?.id ?? "-")")
+        advanceTask?.cancel()
+        advanceTask = nil
+        enqueueTask?.cancel()
+        enqueueTask = nil
+        pendingNew.removeAll()
+        speech.stop()
+        current = nil
+        panel.hide()
+        // Krótka przerwa, żeby kolejne powiadomienie pojawiło się osobno.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            self?.pump()
+        }
+    }
+
+    private func perform(_ action: BannerAction, for item: AlertItem) {
+        DebugLog.write("perform \(action) \(item.id)")
+        removeFromSpool(item)
+        alerts.removeAll { $0.id == item.id }
+        queue.removeAll { $0.id == item.id }
+        knownIDs.remove(item.id)
+        if current?.id == item.id {
+            clearCurrent()
+        }
+        if action == .jump {
+            jumpToAlert(item)
+        }
+    }
+
+    private func removeFromSpool(_ item: AlertItem) {
         // Nazwa pliku to sessionID, ale id bywa inne — szukamy po zawartości.
         if let files = try? FileManager.default.contentsOfDirectory(at: spool, includingPropertiesForKeys: nil) {
             for u in files where u.pathExtension == "json" {
@@ -121,22 +342,6 @@ class AlertStore: ObservableObject {
                 }
             }
         }
-        alerts.removeAll { $0.id == item.id }
-    }
-
-    func jump(_ item: AlertItem) {
-        remove(item)
-        jumpToAlert(item)
-    }
-
-    func clearAll() {
-        DebugLog.write("clearAll")
-        if let files = try? FileManager.default.contentsOfDirectory(at: spool, includingPropertiesForKeys: nil) {
-            for u in files where u.pathExtension == "json" {
-                try? FileManager.default.removeItem(at: u)
-            }
-        }
-        alerts.removeAll()
     }
 
     private func appendHistory(_ item: AlertItem) {
@@ -169,35 +374,8 @@ class AlertStore: ObservableObject {
         history = Array(items.prefix(200))
     }
 
-    private func handleNewItem(_ item: AlertItem) {
-        DebugLog.write("new \(item.id) agent=\(item.agent ?? "-")")
-        let cfg = AppConfig.load()
-        let agent = item.agent ?? "opencode"
-        guard cfg.agentEnabled[agent] ?? true else { return }
-        let mode = cfg.agentMode[agent] ?? "voice+notify"
-        if cfg.bannerOnlyNoVoice || mode == "banner-only" { /* still menu */ }
-
-        // Quiet hours
-        let hour = Calendar.current.component(.hour, from: Date())
-        let quiet = isQuietHour(hour: hour, start: cfg.quietHoursStart, end: cfg.quietHoursEnd)
-
-        // Native notification
-        if cfg.useNativeNotifications && mode != "banner-only" {
-            sendNativeNotification(item: item)
-        }
-
-        // TTS
-        if !cfg.bannerOnlyNoVoice && mode != "notify-only" && mode != "banner-only" && !quiet {
-            speak(item: item, cfg: cfg, agent: agent)
-        }
-
-        // Webhook
-        if !cfg.webhookURL.isEmpty {
-            sendWebhook(item: item, url: cfg.webhookURL)
-        }
-    }
-
     private func isQuietHour(hour: Int, start: Int, end: Int) -> Bool {
+        if start == end { return false } // 0/0 = cicha godzina wyłączona
         if start < end {
             return hour >= start && hour < end
         } else {
@@ -205,66 +383,14 @@ class AlertStore: ObservableObject {
         }
     }
 
-    private func sendNativeNotification(item: AlertItem) {
+    private func sendNativeNotification(item: AlertItem, withSound: Bool) {
         let content = UNMutableNotificationContent()
         content.title = "LimitAlert"
         content.subtitle = item.title
         content.body = item.kind
-        content.sound = .default
+        content.sound = withSound ? .default : nil
         let req = UNNotificationRequest(identifier: item.id, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(req)
-    }
-
-    private func speak(item: AlertItem, cfg: AppConfig, agent: String) {
-        let heading: String
-        switch item.kind {
-        case "limit": heading = "Skończył się limit"
-        case "error": heading = "Zadanie stanęło"
-        case "done": heading = "Zadanie skończone"
-        default: heading = "Alert"
-        }
-        let text = "\(heading). Zadanie: \(item.title)."
-        let voiceId = cfg.voiceByAgent[agent] ?? cfg.voiceId
-        let systemVoice = cfg.systemVoiceByAgent[agent] ?? cfg.systemVoice
-        let apiKey = cfg.elevenlabsApiKey
-        let modelId = cfg.modelId
-        if !apiKey.isEmpty && !cfg.bannerOnlyNoVoice {
-            // ElevenLabs
-            let url = URL(string: "https://api.elevenlabs.io/v1/text-to-speech/\(voiceId)?output_format=mp3_44100_128")!
-            var req = URLRequest(url: url)
-            req.httpMethod = "POST"
-            req.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
-            req.setValue("application/json", forHTTPHeaderField: "content-type")
-            req.httpBody = try? JSONSerialization.data(withJSONObject: ["text": text, "model_id": modelId])
-            let task = URLSession.shared.dataTask(with: req) { data, resp, err in
-                if let data = data, err == nil {
-                    let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("la-\(UUID().uuidString).mp3")
-                    try? data.write(to: tmp)
-                    DispatchQueue.main.async {
-                        do {
-                            let player = try AVAudioPlayer(contentsOf: tmp)
-                            self.player?.stop()
-                            self.player = player
-                            player.play()
-                        } catch {
-                            self.fallbackSay(text: text, voice: systemVoice)
-                        }
-                    }
-                } else {
-                    self.fallbackSay(text: text, voice: systemVoice)
-                }
-            }
-            task.resume()
-        } else {
-            fallbackSay(text: text, voice: systemVoice)
-        }
-    }
-
-    private func fallbackSay(text: String, voice: String) {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/say")
-        p.arguments = ["-v", voice, text]
-        try? p.run()
     }
 
     private func sendWebhook(item: AlertItem, url: String) {
@@ -323,6 +449,12 @@ struct SettingsView: View {
                 Toggle("Tylko banner, bez głosu", isOn: $cfg.bannerOnlyNoVoice)
                 Toggle("Natywne powiadomienia Apple", isOn: $cfg.useNativeNotifications)
                 Toggle("Debug (logi)", isOn: $cfg.debug)
+            }
+            Section("Kolejka banera") {
+                Stepper("Po przeczytaniu pokazuj następny po \(Int(cfg.toastHoldSeconds)) s",
+                        value: $cfg.toastHoldSeconds, in: 1...30, step: 1)
+                Stepper("Bez głosu trzymaj \(Int(cfg.toastNoVoiceSeconds)) s",
+                        value: $cfg.toastNoVoiceSeconds, in: 2...60, step: 1)
             }
             Section("Cicha godzina") {
                 Stepper("Start: \(cfg.quietHoursStart):00", value: $cfg.quietHoursStart, in: 0...23)

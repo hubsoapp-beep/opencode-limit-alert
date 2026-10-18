@@ -4,5 +4,7 @@
   "modelId": "eleven_flash_v2_5",
   "systemVoice": "Zosia",
   "announceDone": true,
+  "toastHoldSeconds": 4,
+  "toastNoVoiceSeconds": 7,
   "debug": false
 }
