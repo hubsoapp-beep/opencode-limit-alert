@@ -119,3 +119,26 @@ Wysyła udawany event „Rate limit exceeded”. Powinien pojawić się banner i
 ## Licencja
 
 MIT
+
+## Claude Code i Codex
+
+Od tej wersji `install.sh` instaluje też hooki dla Claude Code i Codex:
+
+- **Claude Code** — dodaje hook `StopFailure` (oraz `SessionEnd`) do `~/.claude/settings.json`. Hook wywołuje `agent-hook.py claude-code`, który czyta payload, rozpoznaje limit (429 / "rate limit" / quota) i pokazuje banner + czyta tytuł (ElevenLabs / `say`).
+- **Codex** — opakowuje istniejący `~/.codex/herdr-agent-state.sh` wrapperem (zachowuje zaufanie hooków Codexa) i wywołuje `agent-hook.py codex`. Alert odpala się, gdy `last_assistant_message` zawiera słowa o limicie.
+
+Tytuł alertu to nazwa katalogu projektu (`cwd`), np. „Claude Code · myproject”.
+
+## Aplikacja menu bar (LimitAlert.app)
+
+`install.sh` (gdy jest `swift`) buduje `~/Applications/LimitAlert.app` — aplikację w pasku menu, która:
+- pokazuje listę alertów i pozwala przejść/odrzucić/wyczyścić,
+- ma okno ustawień (klucz ElevenLabs, głosy per agent, cicha godzina, routing, webhook Slack/Telegram, natywne powiadomienia Apple),
+- czyta historię alertów,
+- wysyła natywne powiadomienia macOS.
+
+Uruchomienie: `open ~/Applications/LimitAlert.app`. Aplikacja startuje przy logowaniu (ustaw w Ustawieniach systemowych → Ogólne → Elementy logowania), jeśli dodasz ją ręcznie.
+
+Gdy aplikacja działa, przejmuje baner i głos (z ustawieniami per agent, cichą godziną i routingiem). `alerts.py` i plugin JS zapisują wtedy tylko alert do kolejki — nie otwierają drugiego bannera ani nie czytają go ponownie. Po zamknięciu aplikacji wraca samodzielny banner Python.
+
+Jeszcze nie zaimplementowane: własny globalny skrót klawiszowy, auto-aktualizacje (Sparkle), pełny status uprawnień Dostępności z przyciskiem naprawy.

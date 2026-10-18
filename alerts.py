@@ -15,6 +15,9 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+import tempfile
+import urllib.request
+import urllib.error
 
 SPOOL = Path.home() / ".opencode-alerts"
 LOCK = SPOOL / ".show.lock"
@@ -55,6 +58,12 @@ def load_alerts():
 
 
 def remove_alert(item):
+    try:
+        import traceback
+        caller = traceback.extract_stack()[-2]
+        log(f"remove {item.get('id')} z {caller.name}:{caller.lineno}")
+    except Exception:
+        pass
     Path(item["_path"]).unlink(missing_ok=True)
 
 
@@ -468,6 +477,63 @@ def show():
         os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve()), "show"])
 
 
+
+# ---------- konfiguracja / mowa ----------
+
+CONFIG_PATH = Path.home() / ".config/opencode/limit-alert.json"
+
+
+def app_running():
+    """Czy działa LimitAlert.app? Wtedy to ona pokazuje baner i czyta alert."""
+    try:
+        pid = int((SPOOL / ".app.pid").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def load_config():
+    try:
+        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    return {
+        "apiKey": data.get("elevenlabsApiKey") or os.environ.get("ELEVENLABS_API_KEY", ""),
+        "voiceId": data.get("voiceId") or "EXAVITQu4vr4xnSDxMaL",
+        "modelId": data.get("modelId") or "eleven_flash_v2_5",
+        "systemVoice": data.get("systemVoice") or "Zosia",
+        "announceDone": data.get("announceDone", True) is not False,
+    }
+
+
+def speak_text(text):
+    cfg = load_config()
+    api_key = cfg["apiKey"]
+    if api_key:
+        try:
+            url = f"https://api.elevenlabs.io/v1/text-to-speech/{cfg['voiceId']}?output_format=mp3_44100_128"
+            payload = json.dumps({"text": text, "model_id": cfg["modelId"]}).encode("utf-8")
+            req = urllib.request.Request(url, data=payload, headers={
+                "xi-api-key": api_key, "content-type": "application/json"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                audio = r.read()
+            fd, path = tempfile.mkstemp(suffix=".mp3")
+            os.close(fd)
+            Path(path).write_bytes(audio)
+            subprocess.run(["/usr/bin/afplay", path], timeout=60)
+            Path(path).unlink(missing_ok=True)
+            return
+        except Exception as e:
+            log(f"elevenlabs failed: {e}")
+    system_voice = cfg["systemVoice"]
+    if subprocess.run(["/usr/bin/say", "-v", system_voice, text]).returncode != 0:
+        subprocess.run(["/usr/bin/say", text])
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="cmd")
@@ -475,6 +541,14 @@ def main():
     sub.add_parser("list", help="wypisz alerty")
     sub.add_parser("clear", help="usuń wszystkie alerty")
     add = sub.add_parser("add", help="dodaj testowy alert")
+    spk = sub.add_parser("speak", help="powiedz tekst (ElevenLabs/say)")
+    spk.add_argument("text")
+    al = sub.add_parser("alert", help="dodaj alert + przeczytaj")
+    al.add_argument("title")
+    al.add_argument("--kind", default="limit", choices=sorted(KINDS))
+    al.add_argument("--session", default="")
+    al.add_argument("--detail", default="")
+    al.add_argument("--agent", default="")
     add.add_argument("title")
     add.add_argument("--kind", default="limit", choices=sorted(KINDS))
     add.add_argument("--session", default="")
@@ -483,7 +557,29 @@ def main():
     jmp.add_argument("--session", default="")
     args = parser.parse_args()
 
-    if args.cmd == "show":
+    if args.cmd == "speak":
+        speak_text(args.text)
+    elif args.cmd == "alert":
+        SPOOL.mkdir(exist_ok=True)
+        sid = args.session or f"{args.agent or 'alert'}-{datetime.now():%H%M%S%f}"
+        sid = "".join(c if c.isalnum() or c in "._-" else "_" for c in sid)
+        heading = KINDS[args.kind][0]
+        item = {"id": sid, "sessionID": sid, "title": args.title, "kind": args.kind,
+                "detail": args.detail, "agent": args.agent,
+                "time": datetime.now().isoformat(timespec="seconds")}
+        (SPOOL / f"{sid}.json").write_text(json.dumps(item, ensure_ascii=False), encoding="utf-8")
+        print(f"✔ {args.title}")
+        # Gdy działa LimitAlert.app, ona odczyta plik i sama przeczyta alert.
+        if app_running():
+            return
+        # uruchom banner (w tle)
+        try:
+            subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "show"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        except Exception:
+            pass
+        speak_text(f"{heading}. Zadanie: {args.title}.")
+    elif args.cmd == "show":
         show()
     elif args.cmd in (None, "list"):
         items = load_alerts()

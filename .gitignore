@@ -4,3 +4,4 @@ limit-alert.json
 .DS_Store
 node_modules/
 __pycache__/
+LimitAlertApp/.build/

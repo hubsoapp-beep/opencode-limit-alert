@@ -94,7 +94,8 @@ function hasBanner() {
 
 const spoolFile = (sessionID) => join(SPOOL, `${String(sessionID).replace(/[^\w.-]/g, "_")}.json`)
 
-// Zapis do kolejki + start bannera. Drugi `show` sam wychodzi, gdy banner już działa.
+// Zapis do kolejki. Gdy działa LimitAlert.app, to ona odczyta plik i pokaże
+// baner oraz przeczyta alert — nie uruchamiamy wtedy bannera Python.
 function queueBanner(item) {
   try {
     mkdirSync(SPOOL, { recursive: true })
@@ -102,9 +103,23 @@ function queueBanner(item) {
     const tmp = `${file}.${process.pid}.tmp`
     writeFileSync(tmp, JSON.stringify(item))
     renameSync(tmp, file)
-    spawn("/usr/bin/python3", [config.bannerApp, "show"], { detached: true, stdio: "ignore" }).unref()
+    if (!appRunning()) {
+      spawn("/usr/bin/python3", [config.bannerApp, "show"], { detached: true, stdio: "ignore" }).unref()
+    }
   } catch (err) {
     log("banner failed:", String(err))
+  }
+}
+
+// Znacznik pid zapisuje LimitAlert.app (~/.opencode-alerts/.app.pid).
+function appRunning() {
+  try {
+    const pid = Number(readFileSync(join(SPOOL, ".app.pid"), "utf8").trim())
+    if (!pid) return false
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -205,7 +220,8 @@ async function alert(ctx, sessionID, kind, detail) {
   } else {
     await notify(`OpenCode: ${heading}`, `${title}${detail ? ` — ${detail}` : ""}`)
   }
-  await speak(`${heading}. Zadanie: ${title}.`)
+  // Gdy aplikacja działa, ona czyta alert (z głosem per agent).
+  if (!appRunning()) await speak(`${heading}. Zadanie: ${title}.`)
 }
 
 const isLimit = (status, message) =>
