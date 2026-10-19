@@ -678,6 +678,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         AppPresence.register()
+        _ = AlertStore.shared // start store'a od razu — timer spoolu i panel
         setupStatusItem()
         // SIGTERM/SIGINT (np. pkill) też sprzątają znacznik pid.
         for sig in [SIGTERM, SIGINT] {

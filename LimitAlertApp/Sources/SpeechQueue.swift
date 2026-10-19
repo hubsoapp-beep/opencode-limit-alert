@@ -71,7 +71,7 @@ final class SpeechQueue: NSObject, AVAudioPlayerDelegate {
         req.setValue("application/json", forHTTPHeaderField: "content-type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["text": job.text, "model_id": job.modelId])
 
-        let task = URLSession.shared.dataTask(with: req) { [weak self] data, _, error in
+        let task = URLSession.shared.dataTask(with: req) { [weak self] data, response, error in
             DispatchQueue.main.async {
                 guard let self, self.active?.id == job.id else { return }
                 guard error == nil, let data, !data.isEmpty else {
@@ -87,7 +87,9 @@ final class SpeechQueue: NSObject, AVAudioPlayerDelegate {
                         self.speakWithSystemVoice(job)
                     }
                 } catch {
-                    DebugLog.write("tts player failed: \(error.localizedDescription)")
+                    let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+                    let prefix = String(data: data.prefix(120), encoding: .isoLatin1) ?? "?"
+                    DebugLog.write("tts player failed: \(error.localizedDescription) http=\(status) bytes=\(data.count) prefix=\(prefix)")
                     self.speakWithSystemVoice(job)
                 }
             }
