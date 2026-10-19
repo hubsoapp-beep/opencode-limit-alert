@@ -93,6 +93,8 @@ struct AppConfig: Codable {
 // MARK: - Alert Store
 
 class AlertStore: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
+    static let shared = AlertStore()
+
     @Published var alerts: [AlertItem] = []
     let panel = FloatingPanelController()
     @Published var history: [AlertItem] = []
@@ -472,7 +474,6 @@ struct SettingsView: View {
                 .tabItem { Label("Integracje", systemImage: "link") }
         }
         .padding(20)
-        .frame(width: 560, height: 520)
     }
 
     // MARK: - Ogólne
@@ -638,8 +639,7 @@ struct SettingsView: View {
 struct HistoryView: View {
     @ObservedObject var store: AlertStore
     var body: some View {
-        VStack {
-            Text("Historia alertów").font(.headline)
+        VStack(spacing: 0) {
             List(store.history) { item in
                 VStack(alignment: .leading) {
                     Text(item.title).font(.body)
@@ -654,7 +654,7 @@ struct HistoryView: View {
                 }
                 Spacer()
             }.padding()
-        }.frame(width: 420, height: 500)
+        }
     }
 }
 
@@ -663,55 +663,22 @@ struct HistoryView: View {
 @main
 struct LimitAlertApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var store = AlertStore()
-    @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
-        MenuBarExtra("LimitAlert", systemImage: "exclamationmark.triangle.fill") {
-            if store.alerts.isEmpty {
-                Text("Brak alertów").foregroundColor(.secondary)
-            } else {
-                ForEach(store.alerts) { item in
-                    Menu(item.title) {
-                        Button("Przejdź") { store.jump(item) }
-                        Button("Odrzuć") { store.remove(item) }
-                    }
-                }
-                Divider()
-                Button("Wyczyść wszystko") { store.clearAll() }
-            }
-            Divider()
-            SettingsLink {
-                Text("Ustawienia…")
-            }
-            Button("Test alertu") {
-                let p = Process()
-                p.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-                p.arguments = [FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("bin/opencode-alerts/alerts.py").path, "alert", "Test alertu", "--kind", "limit", "--agent", "opencode"]
-                try? p.run()
-            }
-            Button("Historia") { openWindow(id: "history") }
-            Divider()
-            Button("Zakończ") { NSApplication.shared.terminate(nil) }
-        }
-        .menuBarExtraStyle(.window)
-
-        Settings {
-            SettingsView()
-        }
-
-        Window("Historia", id: "history") {
-            HistoryView(store: store)
-        }
+        Settings { EmptyView() }
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    private var statusItem: NSStatusItem?
+    private var settingsWindow: NSWindow?
+    private var historyWindow: NSWindow?
     private var signalSources: [DispatchSourceSignal] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         AppPresence.register()
+        setupStatusItem()
         // SIGTERM/SIGINT (np. pkill) też sprzątają znacznik pid.
         for sig in [SIGTERM, SIGINT] {
             signal(sig, SIG_IGN)
@@ -727,5 +694,133 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         AppPresence.unregister()
+    }
+
+    // MARK: Pasek menu — natywne NSMenu zamiast MenuBarExtra
+
+    private func setupStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item.button?.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill",
+                                     accessibilityDescription: "LimitAlert")
+        let menu = NSMenu()
+        menu.delegate = self
+        menu.autoenablesItems = false
+        item.menu = menu
+        statusItem = item
+    }
+
+    /// Buduje menu przy każdym otwarciu — zawsze aktualna lista alertów.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let store = AlertStore.shared
+        store.refresh()
+
+        if store.alerts.isEmpty {
+            let empty = NSMenuItem(title: "Brak alertów", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            menu.addItem(empty)
+        } else {
+            for alert in store.alerts {
+                let sub = NSMenu()
+                sub.autoenablesItems = false
+                let jump = NSMenuItem(title: "Przejdź", action: #selector(alertJump(_:)), keyEquivalent: "")
+                jump.target = self
+                jump.representedObject = alert
+                jump.isEnabled = true
+                let dismiss = NSMenuItem(title: "Odrzuć", action: #selector(alertDismiss(_:)), keyEquivalent: "")
+                dismiss.target = self
+                dismiss.representedObject = alert
+                dismiss.isEnabled = true
+                sub.addItem(jump)
+                sub.addItem(dismiss)
+
+                let parent = NSMenuItem(title: alert.title, action: nil, keyEquivalent: "")
+                parent.submenu = sub
+                menu.addItem(parent)
+            }
+            menu.addItem(.separator())
+            let clear = NSMenuItem(title: "Wyczyść wszystko", action: #selector(clearAllAlerts(_:)), keyEquivalent: "")
+            clear.target = self
+            menu.addItem(clear)
+        }
+
+        menu.addItem(.separator())
+
+        let test = NSMenuItem(title: "Test alertu", action: #selector(runTestAlert(_:)), keyEquivalent: "")
+        test.target = self
+        menu.addItem(test)
+
+        let history = NSMenuItem(title: "Historia", action: #selector(openHistory(_:)), keyEquivalent: "")
+        history.target = self
+        menu.addItem(history)
+
+        let settings = NSMenuItem(title: "Ustawienia…", action: #selector(openSettings(_:)), keyEquivalent: ",")
+        settings.target = self
+        menu.addItem(settings)
+
+        menu.addItem(.separator())
+        let quit = NSMenuItem(title: "Zakończ", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        menu.addItem(quit)
+    }
+
+    // MARK: Akcje menu
+
+    @objc private func alertJump(_ sender: NSMenuItem) {
+        guard let alert = sender.representedObject as? AlertItem else { return }
+        AlertStore.shared.jump(alert)
+    }
+
+    @objc private func alertDismiss(_ sender: NSMenuItem) {
+        guard let alert = sender.representedObject as? AlertItem else { return }
+        AlertStore.shared.remove(alert)
+    }
+
+    @objc private func clearAllAlerts(_ sender: NSMenuItem) {
+        AlertStore.shared.clearAll()
+    }
+
+    @objc private func runTestAlert(_ sender: NSMenuItem) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        p.arguments = [FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("bin/opencode-alerts/alerts.py").path,
+            "alert", "Test alertu", "--kind", "limit", "--agent", "opencode"]
+        try? p.run()
+    }
+
+    @objc private func openHistory(_ sender: NSMenuItem) {
+        if let w = historyWindow {
+            NSApp.activate(ignoringOtherApps: true)
+            w.makeKeyAndOrderFront(nil)
+            return
+        }
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 520),
+                         styleMask: [.titled, .closable, .resizable, .miniaturizable],
+                         backing: .buffered, defer: false)
+        w.title = "Historia alertów"
+        w.contentView = NSHostingView(rootView: HistoryView(store: AlertStore.shared))
+        w.center()
+        w.isReleasedWhenClosed = false
+        historyWindow = w
+        NSApp.activate(ignoringOtherApps: true)
+        w.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func openSettings(_ sender: NSMenuItem) {
+        if let w = settingsWindow {
+            NSApp.activate(ignoringOtherApps: true)
+            w.makeKeyAndOrderFront(nil)
+            return
+        }
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 580, height: 540),
+                         styleMask: [.titled, .closable],
+                         backing: .buffered, defer: false)
+        w.title = "Ustawienia LimitAlert"
+        w.contentView = NSHostingView(rootView: SettingsView())
+        w.center()
+        w.isReleasedWhenClosed = false
+        settingsWindow = w
+        NSApp.activate(ignoringOtherApps: true)
+        w.makeKeyAndOrderFront(nil)
     }
 }
