@@ -156,7 +156,7 @@ struct BannerView: View {
     // MARK: Sterowanie klawiaturą
 
     private var hint: some View {
-        Text("⌥⌘L  ·  ← → wybór  ·  Tab  ·  1 / 2  ·  ↵  ·  Esc")
+        Text("⌘⇧R  ·  ← → wybór  ·  Tab  ·  1 / 2  ·  ↵  ·  Esc")
             .font(.system(size: 10))
             .foregroundStyle(.tertiary)
             .lineLimit(1)
@@ -301,16 +301,22 @@ final class FloatingPanelController {
     private var hosting: NSHostingView<BannerView>?
     private var model: BannerModel?
     private var keyMonitor: Any?
-    private var hotKey: GlobalHotKey?
+    private var hotKeys: [GlobalHotKey] = []
 
     init() {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, let panel = self.panel, panel.isKeyWindow else { return event }
             return self.handle(event) ? nil : event
         }
-        hotKey = GlobalHotKey(key: UInt32(kVK_ANSI_L), modifiers: UInt32(cmdKey | optionKey)) { [weak self] in
-            self?.focus()
-        }
+        // ⌥⌘L oraz ⌘⇧R — oba dają banerowi fokus klawiatury.
+        hotKeys = [
+            GlobalHotKey(key: UInt32(kVK_ANSI_L), modifiers: UInt32(cmdKey | optionKey)) { [weak self] in
+                self?.focus()
+            },
+            GlobalHotKey(key: UInt32(kVK_ANSI_R), modifiers: UInt32(cmdKey | shiftKey)) { [weak self] in
+                self?.focus()
+            },
+        ]
     }
 
     deinit {
@@ -328,6 +334,8 @@ final class FloatingPanelController {
         model.total = total
         model.selection = 1
         layoutAndShow()
+        // Auto-fokus: baner sam łapie klawiaturę, żeby ← → 1 2 działały od razu.
+        focus()
     }
 
     func updateProgress(index: Int, total: Int) {
@@ -343,8 +351,8 @@ final class FloatingPanelController {
 
     /// Nadaje banerowi fokus klawiatury bez aktywowania całej aplikacji.
     func focus() {
-        guard let panel, panel.isVisible else { return }
-        DebugLog.write("focus panel")
+        guard let panel else { return }
+        DebugLog.write("focus panel (visible=\(panel.isVisible))")
         panel.makeKeyAndOrderFront(nil)
         model?.selection = 1
     }
