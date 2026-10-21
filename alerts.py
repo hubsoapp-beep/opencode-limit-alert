@@ -489,12 +489,18 @@ def app_running():
     try:
         pid = int((SPOOL / ".app.pid").read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
-        return False
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
+        pid = 0
+    if pid:
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            pass
+    # Zawodnik może zniknąć — wtedy ten skrypt i aplikacja gadają równocześnie
+    # i słychać podwójny głos. Sprawdzamy więc też proces po nazwie.
+    return subprocess.run(["/usr/bin/pgrep", "-x", "LimitAlert"],
+                          stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL).returncode == 0
 
 
 def load_config():
@@ -507,11 +513,12 @@ def load_config():
         "voiceId": data.get("voiceId") or "EXAVITQu4vr4xnSDxMaL",
         "modelId": data.get("modelId") or "eleven_flash_v2_5",
         "systemVoice": data.get("systemVoice") or "Zosia",
+        "voiceByAgent": data.get("voiceByAgent") or {},
         "announceDone": data.get("announceDone", True) is not False,
     }
 
 
-def speak_text(text):
+def speak_text(text, agent=""):
     """Czyta tekst, czekając aż poprzednie czytanie się skończy.
 
     Banner ma własną kolejkę, ale `alerts.py speak/alert` może być uruchomiony
@@ -520,15 +527,16 @@ def speak_text(text):
     SPOOL.mkdir(exist_ok=True)
     with SPEAK_LOCK.open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        _speak_text(text)
+        _speak_text(text, agent)
 
 
-def _speak_text(text):
+def _speak_text(text, agent=""):
     cfg = load_config()
     api_key = cfg["apiKey"]
+    voice_id = cfg["voiceByAgent"].get(agent) or cfg["voiceId"]
     if api_key:
         try:
-            url = f"https://api.elevenlabs.io/v1/text-to-speech/{cfg['voiceId']}?output_format=mp3_44100_128"
+            url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}?output_format=mp3_44100_128"
             payload = json.dumps({"text": text, "model_id": cfg["modelId"]}).encode("utf-8")
             req = urllib.request.Request(url, data=payload, headers={
                 "xi-api-key": api_key, "content-type": "application/json"})
@@ -537,14 +545,17 @@ def _speak_text(text):
             fd, path = tempfile.mkstemp(suffix=".mp3")
             os.close(fd)
             Path(path).write_bytes(audio)
-            subprocess.run(["/usr/bin/afplay", path], timeout=60)
+            played = subprocess.run(["/usr/bin/afplay", path], timeout=60).returncode == 0
             Path(path).unlink(missing_ok=True)
-            return
+            if played:
+                return
         except Exception as e:
             log(f"elevenlabs failed: {e}")
     system_voice = cfg["systemVoice"]
-    if subprocess.run(["/usr/bin/say", "-v", system_voice, text]).returncode != 0:
-        subprocess.run(["/usr/bin/say", text])
+    # Nigdy `say` bez -v: domyślny głos macOS (Alex, EN męski) brzmiałby jak
+    # inny lektor. Gdy wskazany głos zawiedzie — lepiej cisza.
+    if system_voice:
+        subprocess.run(["/usr/bin/say", "-v", system_voice, text])
 
 
 def main():
@@ -591,7 +602,7 @@ def main():
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         except Exception:
             pass
-        speak_text(f"{heading}. Zadanie: {args.title}.")
+        speak_text(f"{heading}. Zadanie: {args.title}.", args.agent)
     elif args.cmd == "show":
         show()
     elif args.cmd in (None, "list"):

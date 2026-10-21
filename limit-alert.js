@@ -15,7 +15,7 @@
 //   "debug": false                         // loguj eventy do $TMPDIR/limit-alert.log
 // }
 
-import { execFile, spawn } from "node:child_process"
+import { execFile, execFileSync, spawn } from "node:child_process"
 import {
   accessSync,
   appendFileSync,
@@ -37,7 +37,10 @@ const LOG_PATH = join(tmpdir(), "limit-alert.log")
 const LOCK_DIR = join(tmpdir(), "limit-alert-locks")
 // Kolejka dla bannera alerts.py: jeden plik JSON na sesję.
 const SPOOL = join(homedir(), ".opencode-alerts")
-const DEDUPE_MS = 60_000
+// Ten sam task w jednej sesji bywa zgłaszany wielokrotnie (OpenCode emituje
+// session.execution.succeeded per podzadanie). Za krótkie okno = to samo
+// zdanie powiedziane po kilka razy.
+const DEDUPE_MS = 600_000
 
 function loadConfig() {
   let file = {}
@@ -51,6 +54,7 @@ function loadConfig() {
     voiceId: file.voiceId || "EXAVITQu4vr4xnSDxMaL",
     modelId: file.modelId || "eleven_flash_v2_5",
     systemVoice: file.systemVoice || "Zosia",
+    voiceByAgent: file.voiceByAgent || {},
     bannerApp: file.bannerApp || join(homedir(), "bin/opencode-alerts/alerts.py"),
     announceDone: file.announceDone !== false,
     debug: file.debug === true,
@@ -112,11 +116,18 @@ function queueBanner(item) {
 }
 
 // Znacznik pid zapisuje LimitAlert.app (~/.opencode-alerts/.app.pid).
+// Gdy plik zniknie, a apka żyje, plugin i apka gadają równocześnie —
+// wtedy słychać dwa niezależne głosy. Dlatego poza plikiem sprawdzamy
+// proces po nazwie.
 function appRunning() {
   try {
     const pid = Number(readFileSync(join(SPOOL, ".app.pid"), "utf8").trim())
     if (!pid) return false
     process.kill(pid, 0)
+    return true
+  } catch {}
+  try {
+    execFileSync("/usr/bin/pgrep", ["-x", "LimitAlert"], { stdio: "ignore" })
     return true
   } catch {
     return false
@@ -129,9 +140,10 @@ function unqueue(sessionID) {
   } catch {}
 }
 
-async function speakElevenLabs(text) {
+async function speakElevenLabs(text, agent) {
+  const voiceId = config.voiceByAgent[agent] || config.voiceId
   const res = await fetch(
-    `https://api.elevenlabs.io/v1/text-to-speech/${config.voiceId}?output_format=mp3_44100_128`,
+    `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128`,
     {
       method: "POST",
       headers: { "xi-api-key": config.apiKey, "content-type": "application/json" },
@@ -149,18 +161,18 @@ async function speakElevenLabs(text) {
   if (!ok) throw new Error("afplay failed")
 }
 
-async function speak(text) {
+async function speak(text, agent) {
   if (config.apiKey) {
     try {
-      await speakElevenLabs(text)
+      await speakElevenLabs(text, agent)
       return
     } catch (err) {
       log("elevenlabs failed, system voice fallback:", String(err))
     }
   }
-  if (!(await run("/usr/bin/say", ["-v", config.systemVoice, text]))) {
-    await run("/usr/bin/say", [text])
-  }
+  // Nigdy `say` bez -v: domyślny głos macOS to Alex (EN, męski) i słychać
+  // wtedy dwóch różnych lektorów. Gdy wskazany głos zawiedzie — cisza.
+  if (config.systemVoice) await run("/usr/bin/say", ["-v", config.systemVoice, text])
 }
 
 // Kilka procesów opencode (TUI + serwis) ładuje plugin i każdy widzi te same
@@ -221,7 +233,7 @@ async function alert(ctx, sessionID, kind, detail) {
     await notify(`OpenCode: ${heading}`, `${title}${detail ? ` — ${detail}` : ""}`)
   }
   // Gdy aplikacja działa, ona czyta alert (z głosem per agent).
-  if (!appRunning()) await speak(`${heading}. Zadanie: ${title}.`)
+  if (!appRunning()) await speak(`${heading}. Zadanie: ${title}.`, "opencode")
 }
 
 const isLimit = (status, message) =>

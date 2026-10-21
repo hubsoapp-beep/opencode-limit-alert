@@ -334,8 +334,9 @@ final class FloatingPanelController {
         model.total = total
         model.selection = 1
         layoutAndShow()
-        // Auto-fokus: baner sam łapie klawiaturę, żeby ← → 1 2 działały od razu.
-        focus()
+        // Bez automatycznego fokusu: baner nie może przejmować klawiatury w
+        // trakcie pisania (zjadał naciśnięcia i potrafił przeskoczyć do zadania).
+        // Sterowanie klawiaturą włącza ⌥⌘L / ⌘⇧R albo klik w baner.
     }
 
     func updateProgress(index: Int, total: Int) {

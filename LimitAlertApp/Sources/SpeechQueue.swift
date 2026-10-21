@@ -74,8 +74,9 @@ final class SpeechQueue: NSObject, AVAudioPlayerDelegate {
         let task = URLSession.shared.dataTask(with: req) { [weak self] data, response, error in
             DispatchQueue.main.async {
                 guard let self, self.active?.id == job.id else { return }
-                guard error == nil, let data, !data.isEmpty else {
-                    DebugLog.write("tts elevenlabs failed: \(error?.localizedDescription ?? "empty")")
+                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                guard error == nil, status == 200, let data, !data.isEmpty else {
+                    DebugLog.write("tts elevenlabs failed: http=\(status) \(error?.localizedDescription ?? "empty")")
                     self.speakWithSystemVoice(job)
                     return
                 }
@@ -87,9 +88,7 @@ final class SpeechQueue: NSObject, AVAudioPlayerDelegate {
                         self.speakWithSystemVoice(job)
                     }
                 } catch {
-                    let status = (response as? HTTPURLResponse)?.statusCode ?? -1
-                    let prefix = String(data: data.prefix(120), encoding: .isoLatin1) ?? "?"
-                    DebugLog.write("tts player failed: \(error.localizedDescription) http=\(status) bytes=\(data.count) prefix=\(prefix)")
+                    DebugLog.write("tts player failed: \(error.localizedDescription) bytes=\(data.count)")
                     self.speakWithSystemVoice(job)
                 }
             }
@@ -130,12 +129,12 @@ final class SpeechQueue: NSObject, AVAudioPlayerDelegate {
             DispatchQueue.main.async {
                 guard let self, self.active?.id == job.id else { return }
                 if proc.terminationStatus != 0, !voice.isEmpty {
-                    // Głos z konfiguracji nie istnieje — czytaj domyślnym.
-                    DebugLog.write("say voice \(voice) failed, using default")
-                    self.runSay(job, voice: "")
-                } else {
-                    self.finish(job)
+                    // Głos z konfiguracji nie istnieje — cisza. Wcześniej szło
+                    // `say` bez -v, czyli domyślny Alex (EN, męski): brzmiało
+                    // to jak drugi, inny lektor.
+                    DebugLog.write("say voice \(voice) failed, staying silent")
                 }
+                self.finish(job)
             }
         }
         do {
