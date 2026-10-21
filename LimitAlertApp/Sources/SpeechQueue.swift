@@ -1,9 +1,8 @@
-import AVFoundation
 import Foundation
 
 /// Jeden mówca na całą aplikację. Alerty trafiają do kolejki i są czytane
 /// dokładnie po kolei — nowy nie przerywa poprzedniego i nie nakłada się z nim.
-final class SpeechQueue: NSObject, AVAudioPlayerDelegate {
+final class SpeechQueue {
     private struct Job {
         let id = UUID()
         let text: String
@@ -16,7 +15,7 @@ final class SpeechQueue: NSObject, AVAudioPlayerDelegate {
 
     private var jobs: [Job] = []
     private var active: Job?
-    private var player: AVAudioPlayer?
+    private var playerProcess: Process?
     private var sayProcess: Process?
     private var fetchTask: URLSessionDataTask?
 
@@ -37,8 +36,9 @@ final class SpeechQueue: NSObject, AVAudioPlayerDelegate {
         active = nil
         fetchTask?.cancel()
         fetchTask = nil
-        player?.stop()
-        player = nil
+        playerProcess?.terminationHandler = nil
+        playerProcess?.terminate()
+        playerProcess = nil
         sayProcess?.terminationHandler = nil
         sayProcess?.terminate()
         sayProcess = nil
@@ -80,35 +80,48 @@ final class SpeechQueue: NSObject, AVAudioPlayerDelegate {
                     self.speakWithSystemVoice(job)
                     return
                 }
-                do {
-                    let player = try AVAudioPlayer(data: data)
-                    player.delegate = self
-                    self.player = player
-                    if !player.play() {
-                        self.speakWithSystemVoice(job)
-                    }
-                } catch {
-                    DebugLog.write("tts player failed: \(error.localizedDescription) bytes=\(data.count)")
-                    self.speakWithSystemVoice(job)
-                }
+                self.playMp3(job, data: data)
             }
         }
         fetchTask = task
         task.resume()
     }
 
-    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        DispatchQueue.main.async {
-            guard let job = self.active else { return }
-            self.finish(job)
+    /// Odtwarzamy przez `/usr/bin/afplay`, nie przez AVAudioPlayer — ten
+    /// odrzuca mp3 z ElevenLabs (kAudioFormatUnsupportedDataFormatError),
+    /// przez co alert wypadał na głos systemowy zamiast głosu z API.
+    private func playMp3(_ job: Job, data: Data) {
+        let file = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("limit-alert-\(UUID().uuidString).mp3")
+        do {
+            try data.write(to: file)
+        } catch {
+            DebugLog.write("tts write failed: \(error.localizedDescription)")
+            speakWithSystemVoice(job)
+            return
         }
-    }
-
-    func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
-        DispatchQueue.main.async {
-            guard let job = self.active else { return }
-            DebugLog.write("tts decode error: \(error?.localizedDescription ?? "-")")
-            self.speakWithSystemVoice(job)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
+        process.arguments = [file.path]
+        process.terminationHandler = { [weak self] proc in
+            try? FileManager.default.removeItem(at: file)
+            DispatchQueue.main.async {
+                guard let self, self.active?.id == job.id else { return }
+                if proc.terminationStatus != 0 {
+                    DebugLog.write("tts afplay failed, using system voice")
+                    self.speakWithSystemVoice(job)
+                } else {
+                    self.finish(job)
+                }
+            }
+        }
+        do {
+            try process.run()
+            playerProcess = process
+        } catch {
+            DebugLog.write("tts afplay launch failed: \(error.localizedDescription)")
+            try? FileManager.default.removeItem(at: file)
+            speakWithSystemVoice(job)
         }
     }
 
@@ -122,16 +135,21 @@ final class SpeechQueue: NSObject, AVAudioPlayerDelegate {
     }
 
     private func runSay(_ job: Job, voice: String) {
+        // Pusty głos = `say` bez -v, czyli domyślny Alex (EN, męski). Wolimy
+        // ciszę niż obcy lektor, więc wtedy w ogóle nie czytamy.
+        guard !voice.isEmpty else {
+            DebugLog.write("say skipped: no system voice configured")
+            finish(job)
+            return
+        }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/say")
-        process.arguments = voice.isEmpty ? [job.text] : ["-v", voice, job.text]
+        process.arguments = ["-v", voice, job.text]
         process.terminationHandler = { [weak self] proc in
             DispatchQueue.main.async {
                 guard let self, self.active?.id == job.id else { return }
-                if proc.terminationStatus != 0, !voice.isEmpty {
-                    // Głos z konfiguracji nie istnieje — cisza. Wcześniej szło
-                    // `say` bez -v, czyli domyślny Alex (EN, męski): brzmiało
-                    // to jak drugi, inny lektor.
+                if proc.terminationStatus != 0 {
+                    // Głos z konfiguracji nie istnieje — cisza.
                     DebugLog.write("say voice \(voice) failed, staying silent")
                 }
                 self.finish(job)
@@ -149,7 +167,7 @@ final class SpeechQueue: NSObject, AVAudioPlayerDelegate {
     private func finish(_ job: Job) {
         guard active?.id == job.id else { return }
         active = nil
-        player = nil
+        playerProcess = nil
         sayProcess = nil
         fetchTask = nil
         DebugLog.write("speak end")

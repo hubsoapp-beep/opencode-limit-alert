@@ -20,7 +20,7 @@ Klik w zadanie na liście przełącza na jego kartę w **herdr**, **Orca** albo 
 └──────────────────────────────────────────┘
 ```
 
-Głos: [ElevenLabs](https://elevenlabs.io) (jeśli podasz klucz). Gdy ElevenLabs nie działa (brak klucza, brak sieci, brak kredytów, błąd API), czyta darmowy systemowy głos macOS (`say`, domyślnie polska Zosia).
+Głos: [ElevenLabs](https://elevenlabs.io) (jeśli podasz klucz). Gdy ElevenLabs nie działa (brak klucza, brak sieci, brak kredytów, błąd API), czyta darmowy systemowy głos macOS (`say`, domyślnie polska Zosia). Nigdy nie wraca do domyślnego głosu `say` (Alex, angielski męski) — gdy wskazany głos zawiedzie, jest cisza.
 
 *English: OpenCode v2 plugin that shows a top-right banner listing stalled sessions (click to jump to the tab in herdr, Orca or Ghostty) and speaks the session title (ElevenLabs TTS with a free `say` fallback) when a session hits a rate limit, fails, or finishes.*
 
